@@ -134,6 +134,12 @@ private static void buildMailboxes(String spool) {
         }
     }
 
+private static class MailMsg {
+        String from;
+        final List<String> rcpt = new ArrayList<>();
+        final StringBuilder body = new StringBuilder();
+    }
+
 private static class Conn implements Runnable {
 
         private final Socket sock;
@@ -256,6 +262,14 @@ private static class Conn implements Runnable {
         }
     }
 
-
+private static class MailQueue {
+        private final LinkedBlockingQueue<MailMsg> q = new LinkedBlockingQueue<>();
+        void add(MailMsg m) { 
+            q.offer(m); 
+        }
+        MailMsg take() throws InterruptedException { 
+            return q.take();
+         }
+    }
 
 
