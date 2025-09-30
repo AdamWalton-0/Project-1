@@ -1,7 +1,0 @@
-{
-    "spool":"mail",
-    "server-name":"wonderland",
-    "port":5001,
-    "log": "pop3d.log",
-    "accounts": "accounts.json"
-}
