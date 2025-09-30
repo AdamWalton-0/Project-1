@@ -1,6 +1,0 @@
-2025-09-30 21:52:37 smtpd: log init [smtpd] -> smtpd.log
-2025-09-30 21:52:37 smtpd: boot SmtpConfig{spool=mail, serverName=wonderland, port=5000, log=smtpd.log}
-2025-09-30 21:52:37 smtpd: listen 5000 | host=wonderland | spool=mail
-2025-09-30 21:59:18 smtpd: log init [smtpd] -> smtpd.log
-2025-09-30 21:59:18 smtpd: boot SmtpConfig{spool=mail, serverName=wonderland, port=5000, log=smtpd.log}
-2025-09-30 21:59:18 smtpd: listen 5000 | host=wonderland | spool=mail
