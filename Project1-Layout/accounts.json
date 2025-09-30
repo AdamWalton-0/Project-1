@@ -1,0 +1,14 @@
+{
+    "accounts": [
+        {
+            "username": "alice",
+            "pass": "password",
+            "spool": "mail"
+        },
+        {
+            "username": "zach",
+            "pass": "password",
+            "spool": "mail"
+        }
+    ]
+}
