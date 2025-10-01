@@ -1,0 +1,6 @@
+{
+    "spool":"mail",
+    "server-name":"wonderland",
+    "port":5000,
+    "log": "smtpd.log"
+}
