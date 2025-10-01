@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/** One client session. Commands: HELO/EHLO, MAIL, RCPT, DATA, RSET, NOOP, QUIT. */
+
 public class SMTPHandler implements Runnable {
 
     private enum Phase { NEW, HELO, MAIL, RCPT, DATA }
@@ -99,7 +99,7 @@ public class SMTPHandler implements Runnable {
                 send(out, 250, "stored");
                 return;
             }
-            if (ln.startsWith("..")) ln = ln.substring(1); // dot unstuff
+            if (ln.startsWith("..")) ln = ln.substring(1);
             buf.append(ln).append("\r\n");
         }
         send(out, 451, "link lost");
@@ -157,4 +157,5 @@ public class SMTPHandler implements Runnable {
         out.write(code + " " + msg + "\r\n");
         out.flush();
     }
+
 }
