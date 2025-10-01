@@ -1,12 +1,17 @@
 package smtp;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import maildir.MailMessage;
+import java.util.concurrent.*;
 
-/** Simple message queue. */
 public class MailQueue {
-    private final BlockingQueue<MailMessage> q = new LinkedBlockingQueue<>();
-    public void put(MailMessage m) { if (m != null) q.offer(m); }
-    public MailMessage take() throws InterruptedException { return q.take(); }
+
+    private final LinkedBlockingQueue<MailMessage> q = new LinkedBlockingQueue<>();
+
+    void add(MailMessage m) {
+        q.offer(m);
+    }
+
+    MailMessage take() throws InterruptedException {
+        return q.take();
+    }
 }
