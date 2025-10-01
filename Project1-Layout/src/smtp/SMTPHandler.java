@@ -1,160 +1,164 @@
 package smtp;
 
-import merrimackutil.net.Log;
-import maildir.MailBox;
-import maildir.MailBoxException;
 import maildir.MailMessage;
-import util.Config;
+import util.Config.SmtpConfig;
+import merrimackutil.net.Log;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.net.Socket;
-import java.util.ArrayList;
-import java.util.List;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
-/** One client session. Commands: HELO/EHLO, MAIL, RCPT, DATA, RSET, NOOP, QUIT. */
+
 public class SMTPHandler implements Runnable {
 
-    private enum Phase { NEW, HELO, MAIL, RCPT, DATA }
-
-    private final Socket sk;
-    private final Config.SmtpConfig cfg;
+    private final Socket sock;
+    private final SmtpConfig cfg;
     private final Log lg;
+    private final MailQueue queue;
 
-    private Phase ph = Phase.NEW;
-    private String from = null;
-    private final List<String> rcpt = new ArrayList<>();
-    private final StringBuilder buf = new StringBuilder();
 
-    public SMTPHandler(Socket sk, Config.SmtpConfig cfg, Log lg) {
-        this.sk = sk;
+    SMTPHandler(Socket s, util.Config.SmtpConfig cfg, Log lg, MailQueue queue) { 
+        this.sock = s;
         this.cfg = cfg;
         this.lg = lg;
+        this.queue = queue;
     }
 
-    @Override
-    public void run() {
-        try (Socket s = sk;
-             BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()));
-             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(s.getOutputStream()))) {
+    enum State { 
+        NEED_HELO, READY_FOR_MAIL, READY_FOR_RCPT_DATA, CLOSING
+    }
 
-            s.setSoTimeout(5 * 60 * 1000);
-            send(out, 220, cfg.serverName + " ready");
+    @Override 
+    public void run() {
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(sock.getInputStream(), StandardCharsets.US_ASCII));
+                BufferedWriter out = new BufferedWriter(new OutputStreamWriter(sock.getOutputStream(), StandardCharsets.US_ASCII))) {
+
+            send(out, "220 " + cfg.serverName + " SMTP tinysmtp");
+            State st = State.NEED_HELO;
+            MailMessage msg = null;
 
             String line;
             while ((line = in.readLine()) != null) {
-                String raw = line.trim();
-                if (raw.isEmpty()) { send(out, 500, "empty"); continue; }
-                String up = raw.toUpperCase(Locale.ROOT);
+                lg.log("c: " + line);
+                String u = line.trim();
+                String U = u.toUpperCase(Locale.ROOT);
 
-                if (up.startsWith("HELO ") || up.startsWith("EHLO ")) {
-                    ph = Phase.HELO; resetTx();
-                    send(out, 250, cfg.serverName + " hello " + raw.substring(5).trim());
+                if (U.startsWith("HELO")) {
+                    send(out, "250 " + cfg.serverName + " Hello");
+                    st = State.READY_FOR_MAIL;
+                    continue;
                 }
-                else if (up.startsWith("MAIL FROM:")) {
-                    if (ph != Phase.HELO && ph != Phase.MAIL) { send(out, 503, "seq"); continue; }
-                    String a = path(raw.substring(10).trim());
-                    if (a == null) { send(out, 501, "MAIL FROM:<user@host>"); continue; }
-                    from = a; ph = Phase.MAIL; send(out, 250, "ok");
+
+                if (U.startsWith("NOOP")) { 
+                    send(out, "250 Ok"); 
+                    continue;
                 }
-                else if (up.startsWith("RCPT TO:")) {
-                    if (ph != Phase.MAIL && ph != Phase.RCPT) { send(out, 503, "seq"); continue; }
-                    String a = path(raw.substring(8).trim());
-                    if (a == null) { send(out, 501, "RCPT TO:<user@host>"); continue; }
-                    rcpt.add(a); ph = Phase.RCPT; send(out, 250, "ok");
+
+                if (U.startsWith("RSET")) {
+                    if (st == State.READY_FOR_MAIL || st == State.READY_FOR_RCPT_DATA) {
+                        msg = null;
+                        send(out, "250 Ok");
+                    } else send(out, "503 Bad sequence of commands");
+                    continue;
                 }
-                else if (up.equals("DATA")) {
-                    if (ph != Phase.RCPT || rcpt.isEmpty() || from == null) { send(out, 503, "seq"); continue; }
-                    send(out, 354, "end with .");
-                    readData(in, out);
-                    resetTx();
-                    ph = Phase.HELO;
+
+                if (U.startsWith("QUIT")) { 
+                    send(out, "221 Bye"); 
+                    break; 
                 }
-                else if (up.equals("RSET")) {
-                    resetTx(); ph = Phase.HELO; send(out, 250, "ok");
+
+                if (U.startsWith("MAIL FROM:")) {
+                    if (st != State.READY_FOR_MAIL) { 
+                        send(out, "503 Bad sequence of commands"); 
+                        continue; 
+                    }
+                    String from = u.substring("MAIL FROM:".length()).trim();
+                    if (from.isEmpty() || !from.contains("@")) { 
+                        send(out, "501 Syntax: improper syntax"); 
+                        continue;
+                    }
+                    if (!checkDomain(from)) { 
+                        send(out, "504 5.5.2 " + from + ": Sender address rejected"); 
+                        continue; 
+                    }
+                    msg = new MailMessage();
+                    msg.setFrom(from);
+                    st = State.READY_FOR_RCPT_DATA;
+                    send(out, "250 Ok");
+                    continue;
                 }
-                else if (up.equals("NOOP")) {
-                    send(out, 250, "ok");
+
+                if (U.startsWith("RCPT TO:")) {
+                    if (st != State.READY_FOR_RCPT_DATA || msg == null) { 
+                        send(out, "503 Bad sequence of commands"); 
+                        continue; 
+                    }
+                    String to = u.substring("RCPT TO:".length()).trim();
+                    if (to.isEmpty() || !to.contains("@")) {
+                        send(out, "501 Syntax: improper syntax"); 
+                        continue;
+                    }
+                    if (!checkDomain(to)) { 
+                        send(out, "504 5.5.2 " + to + ": Recipient address rejected"); 
+                        continue;
+                    }
+                    msg.addRecipient(to);
+                    send(out, "250 Ok");
+                    continue;
                 }
-                else if (up.equals("QUIT")) {
-                    send(out, 221, "bye"); break;
+
+                if (U.equals("DATA")) {
+                    if (st != State.READY_FOR_RCPT_DATA || msg == null || msg.getTo().isEmpty()) {
+                            send(out, "503 Bad sequence of commands"); 
+                            continue; 
+                        }
+                    send(out, "354 End data with <CR><LF>.<CR><LF>");
+                    StringBuilder body = new StringBuilder();
+                    while ((line = in.readLine()) != null) {
+                        if (line.equals("."))
+                            break;
+                            body.append(line).append("\r\n");
+                    }
+                    msg.setBody(body.toString());
+
+                    queue.add(msg);
+                    send(out, "250 Ok delivered message.");
+                    st = State.READY_FOR_MAIL;
+                    msg = null;
+                    continue;
                 }
-                else {
-                    send(out, 502, "nope");
-                }
+
+                send(out, "502 5.5.2 Error: command not recognized");
             }
         } catch (IOException e) {
-            lg.log("io " + e.getMessage());
-        } catch (Exception e) {
-            lg.log("err " + e.getMessage());
-        }
-    }
+            try { 
+                lg.log("conn closed: " + e.getMessage()); 
+            } catch (Exception ignored) {
 
-    private void readData(BufferedReader in, BufferedWriter out) throws IOException {
-        buf.setLength(0);
-        String ln;
-        while ((ln = in.readLine()) != null) {
-            if (ln.equals(".")) {
-                store();
-                send(out, 250, "stored");
-                return;
-            }
-            if (ln.startsWith("..")) ln = ln.substring(1); // dot unstuff
-            buf.append(ln).append("\r\n");
-        }
-        send(out, 451, "link lost");
-    }
+                }
+        } finally {
+            try { 
+                sock.close(); 
+            } catch (IOException ignored) {
 
-    private void store() {
-        String body = buf.toString();
-        String subj = "";
-        for (String l : body.split("\r\n")) {
-            if (l.regionMatches(true, 0, "Subject:", 0, 8)) { subj = l.substring(8).trim(); break; }
-        }
-        MailMessage m = new MailMessage()
-                .setFrom(from)
-                .setRecipients(new ArrayList<>(rcpt))
-                .setSubject(subj)
-                .setBody(body);
-
-        String localHost = cfg.serverName.toLowerCase(Locale.ROOT);
-        for (String r : rcpt) {
-            String[] parts = split(r);
-            if (parts == null) { lg.log("bad rcpt " + r); continue; }
-            String user = parts[0];
-            String dom  = parts[1].toLowerCase(Locale.ROOT);
-            if (!dom.equals(localHost)) { lg.log("skip remote " + r); continue; }
-            try {
-                MailBox mb = new MailBox(cfg.spool, user);
-                mb.add(m);
-                lg.log("-> " + user + "@" + cfg.serverName);
-            } catch (MailBoxException e) {
-                lg.log("store fail " + r + ": " + e.getMessage());
             }
         }
     }
 
-    private void resetTx() { from = null; rcpt.clear(); buf.setLength(0); }
-
-    private static String path(String s) {
-        if (s == null || s.isBlank()) return null;
-        String t = s.trim();
-        if (t.startsWith("<") && t.endsWith(">")) t = t.substring(1, t.length() - 1).trim();
-        if (!t.contains("@")) return null;
-        return t;
+    private boolean checkDomain(String addr) {
+        int at = addr.lastIndexOf('@');
+        if (at < 0) return false;
+        return addr.substring(at + 1).equals(cfg.serverName);
     }
 
-    private static String[] split(String s) {
-        if (s == null) return null;
-        String t = s.trim();
-        if (t.startsWith("<") && t.endsWith(">")) t = t.substring(1, t.length() - 1).trim();
-        int at = t.lastIndexOf('@');
-        if (at <= 0 || at == t.length() - 1) return null;
-        return new String[]{ t.substring(0, at), t.substring(at + 1) };
-    }
-
-    private static void send(BufferedWriter out, int code, String msg) throws IOException {
-        out.write(code + " " + msg + "\r\n");
+    private void send(BufferedWriter out, String line) throws IOException {
+        lg.log("s: " + line);
+        out.write(line + "\r\n");
         out.flush();
     }
 }
