@@ -8,7 +8,7 @@ import maildir.MailBox;
 import maildir.MailBoxException;
 import maildir.MailMessage;
 
-/** Worker that consumes messages and writes local deliveries. */
+
 public class MailQueueThread implements Runnable {
     private final MailQueue q;
     private final String spool;
@@ -31,7 +31,7 @@ public class MailQueueThread implements Runnable {
             try {
                 MailMessage m = q.take();
                 for (String addr : m.getTo()) {
-                    String[] parts = splitAddr(addr);   // <— FIX: use local helper
+                    String[] parts = splitAddr(addr);
                     if (parts == null) { lg.log("bad rcpt " + addr); continue; }
                     String user = parts[0];
                     String dom  = parts[1].toLowerCase(Locale.ROOT);
@@ -49,7 +49,7 @@ public class MailQueueThread implements Runnable {
         lg.log("queue stop");
     }
 
-    /** Minimal parser: "<a@b>" or "a@b" -> [a,b] */
+
     private static String[] splitAddr(String s) {
         if (s == null) return null;
         String t = s.trim();
@@ -58,4 +58,5 @@ public class MailQueueThread implements Runnable {
         if (at <= 0 || at == t.length() - 1) return null;
         return new String[]{ t.substring(0, at), t.substring(at + 1) };
     }
+
 }
