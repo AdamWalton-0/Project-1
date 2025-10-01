@@ -1,9 +1,9 @@
+import merrimackutil.cli.LongOption;
+import merrimackutil.cli.OptionParser;
+import merrimackutil.util.Tuple;
 import merrimackutil.json.types.JSONObject;
-import merrimackutil.json.types.JSONArray;
-import merrimackutil.json.types.JSONType;
 import merrimackutil.json.JsonIO;
-import merrimackutil.json.JSONSerializable;
-  
+
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -12,7 +12,6 @@ import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
-
 
 public class SmtpServer {
 
@@ -25,6 +24,8 @@ public class SmtpServer {
 
     private static Log log;
     private static Config cfg;
+    private static ExecutorService pool;
+    private static MailQueue queue;
 
     private static class Log {
         private final BufferedWriter w;
@@ -51,40 +52,55 @@ public class SmtpServer {
         }
     }
 
+
     public static void main(String[] args) {
         try {
-            cfg = loadConfig("smtpd.json");
+            String configPath = "smtpd.json";
+            OptionParser parser = new OptionParser(args);
+            LongOption configOpt = new LongOption("config", true, 'c');
+            parser.setLongOpts(new LongOption[]{configOpt});
+            Tuple<Character,String> opt;
+            while ((opt = parser.getLongOpt(true)) != null) {
+                if (opt.getFirst() == 'c' && opt.getSecond() != null) {
+                    configPath = opt.getSecond();
+                }
+            }
+            cfg = loadConfig(configPath);
+            cfg.log = "smtp.log";    
+
             log = new Log(cfg.log);
             log.info("smtpd starting on port " + cfg.port + ", serverName=" + cfg.serverName + ", spool=" + cfg.spool);
+
+            buildMailboxes(cfg.spool);
+
+            queue = new MailQueue();
+            Thread qThread = new Thread(new MailQueueThread(queue, cfg, log), "mail-queue");
+            qThread.setDaemon(true);
+            qThread.start();
+
+            pool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+
+            try (ServerSocket ss = new ServerSocket(cfg.port)) {
+                while (true) {
+                    Socket c = ss.accept();
+                    pool.submit(new Conn(c));
+                }
+            }
         } catch (Exception e) {
-            try { 
-                if (log != null) log.error("fatal: " + e.getMessage()); 
-            } 
-            catch (Exception ignored) {
-            }
+            try { if (log != null) log.error("fatal: " + e.getMessage()); 
         }
-
-       buildMailboxes(cfg.spool);
-       queue = new MailQueue();
-        Thread qThread = new Thread(new MailQueueThread(queue, cfg, log), "mail-queue");
-        qThread.setDaemon(true);
-        qThread.start();
-
-        pool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
-
-        try (ServerSocket ss = new ServerSocket(cfg.port)) {
-            while (true) {
-                Socket c = ss.accept();
-                pool.submit(new Conn(c));
-            }
-       }
+             catch (Exception ignored) {
+             }
+        } finally {
+            if (pool != null) pool.shutdown();
+        }
     }
-
+ 
     private static Config loadConfig(String path) throws Exception {
-        File file = new File(path);
-        if (!file.exists()) throw new FileNotFoundException("Config file not found: " + path);
+        File f = new File(path);
+        if (!f.exists()) throw new FileNotFoundException("Config file not found: " + path);
 
-        JSONObject object = JsonIO.readObject(file);
+        JSONObject object = JsonIO.readObject(f);
         Config config = new Config();
         config.spool = object.getString("spool");
         config.serverName = object.getString("server-name");
@@ -92,9 +108,8 @@ public class SmtpServer {
         config.log = object.getString("log");
         return config;
     }
-}
 
-private static final Map<String, Mailbox> mailboxes = new ConcurrentHashMap<>();
+    private static final Map<String, Mailbox> mailboxes = new ConcurrentHashMap<>();
 
     private static class Mailbox {
         final String user;
@@ -110,7 +125,7 @@ private static final Map<String, Mailbox> mailboxes = new ConcurrentHashMap<>();
         }
     }
 
-private static void buildMailboxes(String spool) {
+    private static void buildMailboxes(String spool) {
         try {
             Path spoolPath = Paths.get(spool);
             if (!Files.exists(spoolPath)) Files.createDirectories(spoolPath);
@@ -134,13 +149,13 @@ private static void buildMailboxes(String spool) {
         }
     }
 
-private static class MailMsg {
+    private static class MailMsg {
         String from;
         final List<String> rcpt = new ArrayList<>();
         final StringBuilder body = new StringBuilder();
     }
 
-private static class Conn implements Runnable {
+    private static class Conn implements Runnable {
 
         private final Socket sock;
 
@@ -262,7 +277,7 @@ private static class Conn implements Runnable {
         }
     }
 
-private static class MailQueue {
+    private static class MailQueue {
         private final LinkedBlockingQueue<MailMsg> q = new LinkedBlockingQueue<>();
         void add(MailMsg m) { 
             q.offer(m); 
@@ -272,4 +287,60 @@ private static class MailQueue {
          }
     }
 
+    private static class MailQueueThread implements Runnable {
+        private final MailQueue q;
+        private final Config cfg;
+        private final Log log;
+        MailQueueThread(MailQueue q, Config cfg, Log log) { 
+            this.q = q; 
+            this.cfg = cfg; 
+            this.log = log; 
+        }
 
+        @Override 
+        public void run() {
+            while (true) {
+                try {
+                    MailMsg m = q.take();
+                    for (String rcpt : m.rcpt) deliver(rcpt, m.body.toString());
+                } catch (InterruptedException ie) {
+                    return;
+                } catch (Exception e) {
+                    try { 
+                        log.error("delivery error: " + e.getMessage()); 
+                    } 
+                    catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+
+        private void deliver(String rcpt, String body) throws IOException {
+            int at = rcpt.indexOf('@');
+            if (at < 0) { 
+                log.warn("invalid recipient: " + rcpt);
+                return;
+            }
+
+            String user = rcpt.substring(0, at);
+            String domain = rcpt.substring(at + 1);
+            if (!domain.equals(cfg.serverName)) { 
+                log.warn("dropping message for non-local domain: " + rcpt); 
+                return; 
+            }
+
+            Path userDir = Paths.get(cfg.spool, user);
+            Path tmp = userDir.resolve("tmp");
+            Path nw = userDir.resolve("new");
+            Files.createDirectories(tmp);
+            Files.createDirectories(nw);
+
+            String fn = Instant.now().toString() + "-" + ThreadLocalRandom.current().nextInt(100000);
+            Path tmpFile = tmp.resolve(fn);
+            Files.writeString(tmpFile, body, StandardCharsets.US_ASCII, StandardOpenOption.CREATE_NEW);
+            Files.move(tmpFile, nw.resolve(fn), StandardCopyOption.ATOMIC_MOVE);
+
+            log.info("delivered to " + user + ": " + fn);
+        }
+    }
+}
