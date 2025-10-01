@@ -12,10 +12,7 @@ import util.Config;
 import util.ConfigLoader;
 import util.LoggerSetup;
 
-/**
- * Lightweight SMTP daemon.
- * Uses merrimackutil for JSON + logging. Names & comments simplified.
- */
+
 public class SMTPServer {
 
     private final Config.SmtpConfig cfg;
@@ -51,11 +48,12 @@ public static void main(String[] args) {
             if (new File(alt).exists()) p = alt;
         }
 
-        // FIX: use File overload (or just ConfigLoader.loadSmtp())
+
         util.Config.SmtpConfig cfg = util.ConfigLoader.loadSmtp(new File(p));
         new SMTPServer(cfg).start();
     } catch (Exception e) {
         e.printStackTrace();
     }
 }
+
 }
